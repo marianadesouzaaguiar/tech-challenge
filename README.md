@@ -94,8 +94,9 @@ npm test
 
 1. Clone o repositório:
    ```bash
-   git clone https://github.com/usuario/projeto.git
-   cd projeto
+   git clone https://github.com/marianadesouzaaguiar/tech-challenge.git
+
+   cd tech-challenge
 
 2. Instale as dependências:
 npm install
