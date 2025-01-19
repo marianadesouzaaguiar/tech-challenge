@@ -1,0 +1,44 @@
+name: CI Workflow
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      # Checkout do código
+      - name: Checkout code
+        uses: actions/checkout@v2
+
+      # Instalação do Node.js
+      - name: Set up Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '16'  # Versão do Node.js
+
+      # Instalação das dependências
+      - name: Install dependencies
+        run: npm install
+
+      # Carregar variáveis de ambiente do arquivo .env (se necessário)
+      - name: Load environment variables
+        run: echo "MONGO_URI=${{ secrets.MONGO_URI }}" >> $GITHUB_ENV  # Aqui você pode usar secrets do GitHub para variáveis sensíveis
+
+      # Executar testes
+      - name: Run tests
+        run: npm test -- --coverage
+
+      # (Opcional) Fazer deploy para um ambiente de staging/produção
+      - name: Build and Push Docker Image
+  run: |
+    docker build -t my-app .
+    docker tag my-app my-dockerhub-username/my-app:latest
+    docker push my-dockerhub-username/my-app:latest
+
