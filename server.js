@@ -4,10 +4,10 @@ const userSchema = new mongoose.Schema({
     password: { type: String, required: true },
 });
 const User = mongoose.model('User', userSchema);
-//const User = require('./models/User');
-const { Strategy: LocalStrategy } = require('passport-local');
+const { Strategy: LocalStrategy } = require('passport-local').Strategy;
 const request = require('supertest');
 const express = require('express');
+const session = require('express-session');
 const bodyParser = require('body-parser');
 const passport = require('passport');
 const jwt = require('jsonwebtoken');
@@ -27,19 +27,73 @@ mongoose.connect(process.env.MONGO_URI, { useNewUrlParser: true, useUnifiedTopol
     .then(() => console.log('MongoDB conectado'))
     .catch((err) => console.error('Erro ao conectar ao MongoDB:', err));
 
-mongoose.connect(process.env.MONGO_URI, { 
-    useNewUrlParser: true, 
-    useUnifiedTopology: true, 
+mongoose.connect(process.env.MONGO_URI, {
+    useNewUrlParser: true,
+    useUnifiedTopology: true,
     serverSelectionTimeoutMS: 15000// Increase timeout to 15 seconds
 })
 
 // Rotas básicas
 app.get('/', (req, res) => res.send('API está funcionando!'));
 
-// app.get('/posts', (req, res) => {
-//     res.json(posts);
-// });
 
+// Middleware para usar o express-session
+app.use(session({
+    secret: 'seuSegredoSuperSecreto',
+    resave: false,
+    saveUninitialized: false,
+    cookie: { maxAge: 1000 * 60 * 60 * 24 }
+}));
+
+// Inicializar o Passport
+app.use(passport.initialize());
+app.use(passport.session());
+
+// Defina suas rotas e lógicas do Passport
+
+passport.serializeUser(function (user, done) {
+    done(null, user.id);  // Armazena o ID do usuário na sessão
+});
+
+passport.deserializeUser(async function (id, done) {
+    try {
+        const user = await User.findById(id); // Aguarda o resultado da busca
+        done(null, user); // Chama done com o usuário encontrado
+    } catch (err) {
+        done(err); // Passa o erro para o Passport
+    }
+});
+
+passport.use(new LocalStrategy({
+    usernameField: 'email',
+    passwordField: 'password'
+}, function (email, password, done) {
+    // Verifique a autenticação do usuário aqui (exemplo com banco de dados)
+    User.findOne({ email: email }, function (err, user) {
+        if (err) return done(err);
+        if (!user || !user.validPassword(password)) {
+            return done(null, false, { message: 'Email ou senha incorretos' });
+        }
+        return done(null, user);
+    });
+}));
+
+app.post('/login', passport.authenticate('local', {
+    successRedirect: '/dashboard',   // Redireciona para a página de dashboard após o login bem-sucedido
+    failureRedirect: '/login',       // Redireciona para a página de login em caso de falha
+    failureFlash: true               // Se você quiser exibir mensagens de erro
+}));
+
+function ensureAuthenticated(req, res, next) {
+    if (req.isAuthenticated()) { // Verifica se o usuário está autenticado
+        return next();
+    }
+    res.redirect('/login'); // Redireciona para a página de login se não autenticado
+}
+
+app.get('/dashboard', ensureAuthenticated, (req, res) => {
+    res.send(`Bem-vindo ao Dashboard, ${req.user.email}!`);
+});
 
 
 // Configuração do Passport
@@ -61,72 +115,133 @@ passport.use(new LocalStrategy({ usernameField: 'email' }, async (email, passwor
     }
 }));
 
-// Rota de login
-app.post('/login', passport.authenticate('local'), (req, res) => {
-    const token = jwt.sign({ id: req.user._id }, process.env.JWT_SECRET, { expiresIn: '1h' });
-    res.json({ token });
-});
 
 app.post('/register', async (req, res) => {
     const { email, password } = req.body;
-  
+    console.log(req.body); // Verifique os dados que estão sendo recebidos
+
     // Validação dos dados
     if (!email || !password) {
-      return res.status(400).json({ error: 'Email e senha são obrigatórios' });
+        return res.status(400).json({ error: 'Email e senha são obrigatórios' });
     }
-  
+
     // Criptografar a senha
     const hashedPassword = await bcrypt.hash(password, 10);
-  
+
     // Criar um novo usuário
     const newUser = new User({ email, password: hashedPassword });
     try {
-      await newUser.save();
-      res.status(201).json({ message: 'Usuário cadastrado com sucesso' });
+        await newUser.save();
+        res.status(201).json({ message: 'Usuário cadastrado com sucesso' });
     } catch (error) {
-      console.error(error);
-      res.status(500).json({ error: 'Erro ao cadastrar usuário' });
+        console.error(error);
+        res.status(500).json({ error: 'Erro ao cadastrar usuário' });
     }
-  });
+});
+
+// Mock para exemplo
+const users = [
+    { id: 1, email: 'user@example.com', password: '$2b$10$abcdef...' }, // Hash de senha
+];
+
+
+function generateToken(user) {
+    const payload = {
+        id: user.id, // ID único do usuário
+        email: user.email, // Email ou outro dado relevante
+    };
+
+    // Assinando o token
+    return jwt.sign(payload, process.env.JWT_SECRET, { expiresIn: '1h' }); // Expira em 1 hora
+}
+
+
 // Middleware para proteger rotas
 function authMiddleware(req, res, next) {
     const authHeader = req.headers.authorization;
 
-    if (!authHeader) {
-        return res.status(401).json({ message: 'Acesso negado' });
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+        return res.status(401).json({ message: 'Token não fornecido ou malformado' });
     }
+
 
     if (authHeader && authHeader.split(' ')[1]) {
         const token = authHeader.split(' ')[1];
+
         try {
             const decoded = jwt.verify(token, process.env.JWT_SECRET);
-            req.user = decoded;
-            next();
+            console.log(decoded); // Mostra os dados decodificados
         } catch (err) {
+            if (err.name === 'TokenExpiredError') {
+                return res.status(401).json({ message: 'Token expirado' });
+            }
             return res.status(401).json({ message: 'Token inválido' });
         }
+
     } else {
         return res.status(401).json({ message: 'Acesso negado' });
     }
 }
 
+
+const token = jwt.sign(
+    { userId: '12345', email: 'usuario@example.com' }, // Dados que você deseja armazenar no token
+    process.env.JWT_SECRET,                            // Segredo
+    { expiresIn: '1h' }                                // Tempo de expiração
+);
+
+console.log(token);
+
+
 // Rota protegida para posts
 app.get('/posts', authMiddleware, async (req, res) => {
     try {
-        const { user } = req;
+        const { user } = req; // Usuário autenticado extraído do middleware
+        req.user = { _id: 'mockUserId', role: 'professor' }; // Usuário fictício
+        next();
+        console.log('Usuário autenticado:', req.user);
 
-        if (user.role === 'professor') {
-            const posts = await Post.find({ autor: user._id });
-            res.json(posts);
-        } else {
-            const posts = await Post.find();
-            res.json(posts);
+
+        if (!user) {
+            return res.status(401).json({ error: 'Usuário não autenticado' });
         }
+
+        let posts;
+        if (user.role === 'professor') {
+            // Busca posts específicos do professor (autor = user._id)
+            posts = await Post.find({ autor: user._id });
+        } else {
+            // Busca todos os posts para outros usuários
+            posts = await Post.find();
+        }
+
+        if (!posts || posts.length === 0) {
+            return res.status(404).json({ error: 'Nenhum post encontrado' });
+        }
+
+        res.status(200).json(posts);
     } catch (error) {
-        console.error(error);
+        console.error('Erro ao buscar posts:', error.message);
         res.status(500).json({ error: 'Erro ao buscar posts' });
     }
 });
+
+app.get('/test', authMiddleware, (req, res) => {
+    res.json({ user: req.user });
+});
+
+
+
+const postSchema = new mongoose.Schema({
+    title: { type: String, required: true },
+    content: { type: String, required: true },
+    createdAt: { type: Date, default: Date.now },
+});
+
+const Post = mongoose.model('Post', postSchema);
+
+module.exports = Post;
+
 
 app.get('/posts/:id', (req, res) => {
     const { id } = req.params;
@@ -138,7 +253,7 @@ app.get('/posts/:id', (req, res) => {
 });
 
 const posts = [
-    { id: 1, titulo: 'Primeiro Post', conteudo: 'Este é o conteúdo do primeiro post.' },
+    { id: 1, titulo: 'Primeiro Post', conteudo: 'Este é o conteúdo do primeiro post.', autor: 'Mariana' },
     { id: 2, titulo: 'Segundo Post', conteudo: 'Conteúdo relacionado ao segundo post.' },
     { id: 3, titulo: 'Tutorial Node.js', conteudo: 'Aprenda Node.js neste tutorial completo.' },
     { id: 4, titulo: 'Node.js Avançado', conteudo: 'Técnicas avançadas de Node.js.' }
@@ -159,6 +274,28 @@ app.post('/posts', (req, res) => {
     res.status(201).json(novoPost);
 });
 
+// app.post('/posts', authMiddleware, async (req, res) => {
+//     // Lógica para criar um post
+//     try {
+//         const { title, content } = req.body;
+//         if (!title || !content) {
+//             return res.status(400).json({ error: 'Título e conteúdo são obrigatórios' });
+//         }
+
+//         const post = new Post({ title, content, autor: req.user._id });
+//         await post.save();
+//         res.status(201).json(post);
+//     } catch (error) {
+//         console.error(error);
+//         res.status(500).json({ error: 'Erro ao criar post' });
+//     }
+// });
+
+
+app.post('/posts', (req, res) => {
+    console.log('Requisição recebida:', req.body);
+    res.send('Debugando...');
+});
 
 
 app.put('/posts/:id', (req, res) => {
