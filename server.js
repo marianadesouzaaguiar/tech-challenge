@@ -1,8 +1,40 @@
 const mongoose = require('mongoose');
+const bcrypt = require('bcryptjs'); // Para criptografar a senha
 const userSchema = new mongoose.Schema({
-    email: { type: String, required: true, unique: true },
-    password: { type: String, required: true },
+    name: {
+        type: String,
+        required: true,
+    },
+    email: {
+        type: String,
+        required: true,
+        unique: true, // Garantir que o e-mail seja único
+    },
+    password: {
+        type: String,
+        required: true,
+    },
+    role: {
+        type: String,
+        enum: ['professor', 'aluno'], // Enum para limitar os valores de role
+        default: 'aluno',
+    },
 });
+
+// Criptografar a senha antes de salvar no banco
+userSchema.pre('save', async function (next) {
+    if (!this.isModified('password')) return next();
+
+    // Criptografa a senha com um salt (sal)
+    const salt = await bcrypt.genSalt(10);
+    this.password = await bcrypt.hash(this.password, salt);
+    next();
+});
+
+// Método para comparar a senha fornecida com a armazenada no banco
+userSchema.methods.matchPassword = async function (password) {
+    return await bcrypt.compare(password, this.password);
+};
 const User = mongoose.model('User', userSchema);
 const { Strategy: LocalStrategy } = require('passport-local').Strategy;
 const request = require('supertest');
@@ -11,7 +43,6 @@ const session = require('express-session');
 const bodyParser = require('body-parser');
 const passport = require('passport');
 const jwt = require('jsonwebtoken');
-const bcrypt = require('bcryptjs');
 const app = express();
 const PORT = process.env.PORT || 5000;
 require('dotenv').config();
@@ -78,6 +109,40 @@ passport.use(new LocalStrategy({
     });
 }));
 
+// Rota de login de usuário
+app.post('/login', async (req, res) => {
+
+    const { email, password } = req.body;
+
+    try {
+        // Verifica se o usuário existe
+        const user = await User.findOne({ email });
+        if (!user) {
+            return res.status(404).json({ error: 'Usuário não encontrado' });
+        }
+
+        // Compara a senha fornecida com a armazenada no banco
+        const isMatch = await user.matchPassword(password);
+        if (!isMatch) {
+            return res.status(401).json({ error: 'Senha incorreta' });
+        }
+
+        // Gera o token JWT
+        const token = jwt.sign(
+            { _id: user._id, role: user.role }, // Payload
+            secretKey, // Chave secreta
+            { expiresIn: '1h' } // Expiração do token
+        );
+
+        // Retorna o token para o cliente
+        res.status(200).json({ token });
+    } catch (error) {
+        console.error('Erro ao fazer login:', error);
+        res.status(500).json({ error: 'Erro ao fazer login' });
+    }
+});
+
+
 app.post('/login', passport.authenticate('local', {
     successRedirect: '/dashboard',   // Redireciona para a página de dashboard após o login bem-sucedido
     failureRedirect: '/login',       // Redireciona para a página de login em caso de falha
@@ -116,33 +181,34 @@ passport.use(new LocalStrategy({ usernameField: 'email' }, async (email, passwor
 }));
 
 
+app.use(express.json()); // Para permitir que o corpo da requisição seja em JSON
+
+const secretKey = 'suaChaveSecreta'; // Chave secreta para JWT
+
+// Rota de cadastro de usuário
 app.post('/register', async (req, res) => {
-    const { email, password } = req.body;
-    console.log(req.body); // Verifique os dados que estão sendo recebidos
+    const { name, email, password, role } = req.body;
 
-    // Validação dos dados
-    if (!email || !password) {
-        return res.status(400).json({ error: 'Email e senha são obrigatórios' });
-    }
-
-    // Criptografar a senha
-    const hashedPassword = await bcrypt.hash(password, 10);
-
-    // Criar um novo usuário
-    const newUser = new User({ email, password: hashedPassword });
     try {
+        // Verifica se o e-mail já existe
+        const existingUser = await User.findOne({ email });
+        if (existingUser) {
+            return res.status(400).json({ error: 'E-mail já registrado' });
+        }
+
+        // Cria o novo usuário
+        const newUser = new User({ name, email, password, role });
         await newUser.save();
-        res.status(201).json({ message: 'Usuário cadastrado com sucesso' });
+
+        res.status(201).json({
+            message: 'Usuário registrado com sucesso',
+            user: { name: newUser.name, email: newUser.email, role: newUser.role }
+        });
     } catch (error) {
-        console.error(error);
+        console.error('Erro ao cadastrar usuário:', error);
         res.status(500).json({ error: 'Erro ao cadastrar usuário' });
     }
 });
-
-// Mock para exemplo
-const users = [
-    { id: 1, email: 'user@example.com', password: '$2b$10$abcdef...' }, // Hash de senha
-];
 
 
 function generateToken(user) {
@@ -156,55 +222,38 @@ function generateToken(user) {
 }
 
 
-// Middleware para proteger rotas
-function authMiddleware(req, res, next) {
-    const authHeader = req.headers.authorization;
+// Middleware de autenticação
+const authMiddleware = async (req, res, next) => {
+    const token = req.header('Authorization')?.replace('Bearer ', '');
 
-    if (!authHeader || !authHeader.startsWith('Bearer ')) {
-        return res.status(401).json({ message: 'Token não fornecido ou malformado' });
+    if (!token) {
+        return res.status(401).json({ error: 'Token não fornecido' });
     }
 
+    try {
+        // Verifica o token
+        const decoded = jwt.verify(token, 'suaChaveSecreta');
+        const user = await User.findById(decoded._id);
 
-    if (authHeader && authHeader.split(' ')[1]) {
-        const token = authHeader.split(' ')[1];
-
-        try {
-            const decoded = jwt.verify(token, process.env.JWT_SECRET);
-            console.log(decoded); // Mostra os dados decodificados
-        } catch (err) {
-            if (err.name === 'TokenExpiredError') {
-                return res.status(401).json({ message: 'Token expirado' });
-            }
-            return res.status(401).json({ message: 'Token inválido' });
+        if (!user) {
+            return res.status(401).json({ error: 'Usuário não encontrado' });
         }
 
-    } else {
-        return res.status(401).json({ message: 'Acesso negado' });
+        // Adiciona o usuário ao req.user
+        req.user = user;
+        next();
+    } catch (error) {
+        console.error('Erro ao verificar o token:', error);
+        res.status(401).json({ error: 'Token inválido' });
     }
-}
-
-
-const token = jwt.sign(
-    { userId: '12345', email: 'usuario@example.com' }, // Dados que você deseja armazenar no token
-    process.env.JWT_SECRET,                            // Segredo
-    { expiresIn: '1h' }                                // Tempo de expiração
-);
-
-console.log(token);
+};
 
 
 // Rota protegida para posts
 app.get('/posts', authMiddleware, async (req, res) => {
     try {
         const { user } = req; // Usuário autenticado extraído do middleware
-        req.user = { _id: 'mockUserId', role: 'professor' }; // Usuário fictício
-        next();
-        console.log('Usuário autenticado:', req.user);
-
-
-        if (!user) {
-            return res.status(401).json({ error: 'Usuário não autenticado' });
-        }
+        console.log('Usuário autenticado:', user);
 
         let posts;
         if (user.role === 'professor') {
@@ -226,41 +275,43 @@ app.get('/posts', authMiddleware, async (req, res) => {
     }
 });
 
-app.get('/test', authMiddleware, (req, res) => {
-    res.json({ user: req.user });
-});
-
-
 
 const postSchema = new mongoose.Schema({
-    title: { type: String, required: true },
-    content: { type: String, required: true },
-    createdAt: { type: Date, default: Date.now },
+    titulo: { type: String, required: true },
+    conteudo: { type: String, required: true },
+    autor: { type: String, required: true}
 });
 
 const Post = mongoose.model('Post', postSchema);
 
 module.exports = Post;
 
-
+  
 app.get('/posts/:id', (req, res) => {
     const { id } = req.params;
+  
+    // Mock completo
+    const posts = [
+      { id: 1, titulo: "Introdução ao Node.js", conteudo: "Texto sobre Node.js", autor: "João Silva" },
+      { id: 2, titulo: "Aprendendo MongoDB", conteudo: "Texto sobre MongoDB", autor: "Maria Souza" },
+    ];
+  
+    // Busca o post pelo ID (convertendo id para número)
     const post = posts.find(p => p.id === parseInt(id));
+  
     if (!post) {
-        return res.status(404).json({ error: 'Post não encontrado' });
+      return res.status(404).json({ error: "Post não encontrado" });
     }
+  
     res.json(post);
-});
-
+  });
+  
 const posts = [
-    { id: 1, titulo: 'Primeiro Post', conteudo: 'Este é o conteúdo do primeiro post.', autor: 'Mariana' },
-    { id: 2, titulo: 'Segundo Post', conteudo: 'Conteúdo relacionado ao segundo post.' },
-    { id: 3, titulo: 'Tutorial Node.js', conteudo: 'Aprenda Node.js neste tutorial completo.' },
-    { id: 4, titulo: 'Node.js Avançado', conteudo: 'Técnicas avançadas de Node.js.' }
-];
+     { id: 1, titulo: "Introdução ao Node.js", conteudo: "Texto sobre Node.js", autor: "João Silva" },
+     { id: 2, titulo: "Aprendendo MongoDB", conteudo: "Texto sobre MongoDB", autor: "Maria Souza" },
+   ];
+
 let nextId = 1;
-
-
 app.post('/posts', (req, res) => {
     console.log('Recebido POST em /posts:', req.body); // Dentro da função de rota, o req está disponível
     const { titulo, conteudo, autor } = req.body;
@@ -272,29 +323,7 @@ app.post('/posts', (req, res) => {
     const novoPost = { id: nextId++, titulo, conteudo, autor };
     posts.push(novoPost);
     res.status(201).json(novoPost);
-});
 
-// app.post('/posts', authMiddleware, async (req, res) => {
-//     // Lógica para criar um post
-//     try {
-//         const { title, content } = req.body;
-//         if (!title || !content) {
-//             return res.status(400).json({ error: 'Título e conteúdo são obrigatórios' });
-//         }
-
-//         const post = new Post({ title, content, autor: req.user._id });
-//         await post.save();
-//         res.status(201).json(post);
-//     } catch (error) {
-//         console.error(error);
-//         res.status(500).json({ error: 'Erro ao criar post' });
-//     }
-// });
-
-
-app.post('/posts', (req, res) => {
-    console.log('Requisição recebida:', req.body);
-    res.send('Debugando...');
 });
 
 
@@ -370,4 +399,6 @@ if (require.main === module) {
 
 // Exporte a instância do app
 module.exports = app;
+module.exports = User;
+
 
